@@ -1,0 +1,68 @@
+name: Daily SUSEP scan
+
+on:
+  schedule:
+    # 09:30 UTC = 06:30 BRT (após registros noturnos da SUSEP)
+    - cron: "30 9 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (não envia email)"
+        type: boolean
+        default: false
+      uf_filter:
+        description: "UF a filtrar"
+        type: string
+        default: "MG"
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          UF_FILTER: ${{ github.event.inputs.uf_filter || 'MG' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+        run: python -m pipeline.main
+
+      - name: Upload output as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: novos-${{ github.run_id }}
+          path: |
+            output/
+            state/last_run.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Commit state
+        if: success()
+        run: |
+          git config user.name "susep-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state/
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: snapshot $(date -u +%Y-%m-%d)"
+            git push
+          else
+            echo "no state changes"
+          fi
