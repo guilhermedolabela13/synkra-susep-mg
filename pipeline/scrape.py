@@ -23,7 +23,12 @@ def make_session():
         allowed_methods=("GET",),
     )
     s.mount("https://", HTTPAdapter(max_retries=retry, pool_connections=40, pool_maxsize=40))
-    s.headers.update({"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+    s.headers.update({
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+        "Referer": "https://www2.susep.gov.br/safe/Corretores/pesquisa",
+    })
     return s
 
 

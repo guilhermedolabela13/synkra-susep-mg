@@ -94,7 +94,7 @@ def main():
     log(f"=== Pipeline run {run_id} | UF={UF_FILTER} | dry_run={DRY_RUN} ===")
 
     log("Step 1/5: Scrape SUSEP")
-    records, errors = scrape_all(workers=10, on_progress=log)
+    records, errors = scrape_all(workers=20, on_progress=log)
     if errors:
         log(f"WARN: {len(errors)} pages failed after retries")
     if len(records) < 100000:
