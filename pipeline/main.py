@@ -37,6 +37,17 @@ LAST_RUN = STATE / "last_run.json"
 
 UF_FILTER = os.environ.get("UF_FILTER", "MG").upper()
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
+# Year mode: "current" (só registros do ano atual) ou "all" (qualquer ano)
+NEW_FILTER = os.environ.get("NEW_FILTER", "current").lower()
+
+
+def is_current_year_protocol(protocolo):
+    """Protocolo SUSEP: YY + X + 6 dígitos. YY = ano (26 = 2026). X = 1 (PF) ou 2 (PJ)."""
+    if not protocolo or len(protocolo) < 3:
+        return False
+    yy = protocolo[:2]
+    current_yy = str(datetime.now().year)[-2:]
+    return yy == current_yy
 
 
 def log(msg):
@@ -151,6 +162,11 @@ def main():
         new_records = [r for r in today_active if r["corretorId"] in new_ids]
         for r in new_records:
             history[r["corretorId"]] = run_date  # registra data da detecção
+
+        if NEW_FILTER == "current":
+            before = len(new_records)
+            new_records = [r for r in new_records if is_current_year_protocol(r.get("protocolo", ""))]
+            log(f"  filtered to current-year protocols only: {before} -> {len(new_records)} (reativados antigos descartados)")
     log(f"  new since last run: {len(new_records)} | history now: {len(history)}")
 
     log("Step 4/6: Enrich + filter UF")
