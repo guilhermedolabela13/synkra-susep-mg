@@ -62,9 +62,16 @@ jobs:
           git config user.name "susep-bot"
           git config user.email "bot@users.noreply.github.com"
           git add state/
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: snapshot $(date -u +%Y-%m-%d)"
-            git push
-          else
+          if git diff --staged --quiet; then
             echo "no state changes"
+            exit 0
           fi
+          git commit -m "chore: snapshot $(date -u +%Y-%m-%d_%H%M)"
+          # retry push até 5x rebasando contra qualquer commit feito durante o run
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main && git push && exit 0
+            echo "push falhou, tentativa $i — aguardando 10s"
+            sleep 10
+          done
+          echo "push falhou após 5 tentativas"
+          exit 1
