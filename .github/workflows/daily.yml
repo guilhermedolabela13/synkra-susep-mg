@@ -2,8 +2,10 @@ name: Daily SUSEP scan
 
 on:
   schedule:
-    # 09:30 UTC = 06:30 BRT (após registros noturnos da SUSEP)
+    # 09:30 UTC = 06:30 BRT  (manhã)
     - cron: "30 9 * * *"
+    # 17:30 UTC = 14:30 BRT  (tarde)
+    - cron: "30 17 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
