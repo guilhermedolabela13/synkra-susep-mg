@@ -1,10 +1,10 @@
 {
-  "run_id": "2026-08-08_213428",
-  "timestamp": "2026-08-08T22:32:25.552935",
-  "total_records": 166544,
-  "active_today": 150206,
-  "new_since_last": 57,
-  "new_MG": 3,
+  "run_id": "2026-08-09_213705",
+  "timestamp": "2026-08-09T23:03:47.124849",
+  "total_records": 166550,
+  "active_today": 150227,
+  "new_since_last": 9,
+  "new_MG": 0,
   "scrape_errors": 0,
-  "history_size": 5467
+  "history_size": 5504
 }
