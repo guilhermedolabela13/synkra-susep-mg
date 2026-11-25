@@ -35,7 +35,16 @@ def send_email(subject, body, attachments=None, html=None):
         )
 
     ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as srv:
-        srv.login(user, pwd)
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=60) as srv:
+        try:
+            srv.login(user, pwd)
+        except (smtplib.SMTPAuthenticationError, smtplib.SMTPServerDisconnected) as e:
+            # O Gmail derruba a conexão (em vez de responder 535) quando a
+            # App Password é inválida ou foi revogada.
+            raise RuntimeError(
+                f"Gmail recusou o login de {user} ({type(e).__name__}: {e}). "
+                "A App Password provavelmente foi revogada: gere outra em "
+                "https://myaccount.google.com/apppasswords e atualize o secret SMTP_PASS."
+            ) from e
         srv.send_message(msg)
     return len(to_addrs)

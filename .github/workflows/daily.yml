@@ -14,6 +14,10 @@ on:
         description: "UF a filtrar"
         type: string
         default: "MG"
+      backfill_since:
+        description: "Reenviar corretores do histórico detectados desde (YYYY-MM-DD). Vazio = não reenvia"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -21,7 +25,8 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 300 min cobre o reenvio retroativo (~1.000 CNPJs a 4 s cada + scrape)
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -35,12 +40,14 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run pipeline
+        id: pipeline
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
           SMTP_TO: ${{ secrets.SMTP_TO }}
           UF_FILTER: ${{ github.event.inputs.uf_filter || 'MG' }}
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          BACKFILL_SINCE: ${{ github.event.inputs.backfill_since || '' }}
         run: python -m pipeline.main
 
       - name: Upload output as artifact
@@ -54,8 +61,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      # Também commita quando só o email falhou: a fila de pendentes precisa ser
+      # salva para o próximo run reenviar. O job continua marcado como falho.
       - name: Commit state
-        if: success()
+        if: success() || steps.pipeline.outputs.email_failed == 'true'
         run: |
           git config user.name "susep-bot"
           git config user.email "bot@users.noreply.github.com"

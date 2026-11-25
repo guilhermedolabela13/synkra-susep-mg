@@ -7,8 +7,18 @@ Fluxo:
   3. Identifica novos: corretorId presente hoje, ausente ontem, situacao=Ativo
   4. Enriquece novos via CNPJ.ws + fallbacks
   5. Filtra UF=MG
-  6. Se há novos MG, gera HTML interativo e envia email com HTML anexo
-  7. Salva state (known_ids + detection_history) — committado pelo workflow
+  6. Se há novos MG (ou pendentes de envios anteriores), gera HTML interativo
+     e envia email com HTML anexo
+  7. Salva state (known_ids + detection_history + pending_email) — committado
+     pelo workflow
+
+Fila de pendentes: todo corretor MG detectado que não foi enviado (falha de
+SMTP ou dry run) vai para state/pending_email.json e entra no próximo envio.
+Quando o email falha, o estado é salvo e o processo sai com código 1, para o
+run aparecer como falho no GitHub.
+
+Reenvio retroativo: BACKFILL_SINCE=YYYY-MM-DD reprocessa os ids do histórico
+detectados a partir dessa data (enriquece de novo e coloca na fila).
 """
 import gzip
 import json
@@ -34,11 +44,14 @@ OUT.mkdir(exist_ok=True)
 KNOWN_IDS = STATE / "known_ids.txt.gz"
 DETECTION_HISTORY = STATE / "detection_history.json.gz"
 LAST_RUN = STATE / "last_run.json"
+PENDING_EMAIL = STATE / "pending_email.json"
 
 UF_FILTER = os.environ.get("UF_FILTER", "MG").upper()
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 # Year mode: "current" (só registros do ano atual) ou "all" (qualquer ano)
 NEW_FILTER = os.environ.get("NEW_FILTER", "current").lower()
+# Reenvio retroativo: data inicial (YYYY-MM-DD) dos ids do histórico a reprocessar
+BACKFILL_SINCE = os.environ.get("BACKFILL_SINCE", "").strip()
 
 
 def is_current_year_protocol(protocolo):
@@ -78,6 +91,39 @@ def load_detection_history():
 def save_detection_history(history):
     with gzip.open(DETECTION_HISTORY, "wt", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, separators=(",", ":"))
+
+
+def load_pending():
+    """Corretores já enriquecidos que ainda não saíram por email."""
+    if not PENDING_EMAIL.exists():
+        return []
+    return json.loads(PENDING_EMAIL.read_text(encoding="utf-8"))
+
+
+def save_pending(records):
+    if not records:
+        if PENDING_EMAIL.exists():
+            PENDING_EMAIL.unlink()
+        return
+    PENDING_EMAIL.write_text(
+        json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+
+
+def merge_by_id(*groups):
+    """Junta listas de records sem repetir corretorId; a última ocorrência vence."""
+    merged = {}
+    for group in groups:
+        for r in group:
+            merged[r["corretorId"]] = r
+    return list(merged.values())
+
+
+def set_github_output(name, value):
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{name}={value}\n")
 
 
 def build_email_html_summary(new_mg, run_date, total_records, total_active, total_new):
@@ -131,7 +177,7 @@ def build_email_html_summary(new_mg, run_date, total_records, total_active, tota
 def main():
     run_id = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     run_date = datetime.now().strftime("%Y-%m-%d")
-    log(f"=== Pipeline run {run_id} | UF={UF_FILTER} | dry_run={DRY_RUN} ===")
+    log(f"=== Pipeline run {run_id} | UF={UF_FILTER} | dry_run={DRY_RUN} | backfill_since={BACKFILL_SINCE or '-'} ===")
 
     log("Step 1/6: Scrape SUSEP")
     records, errors = scrape_all(workers=20, on_progress=log)
@@ -169,28 +215,60 @@ def main():
             log(f"  filtered to current-year protocols only: {before} -> {len(new_records)} (reativados antigos descartados)")
     log(f"  new since last run: {len(new_records)} | history now: {len(history)}")
 
+    backfill_records = []
+    if BACKFILL_SINCE and not is_first_run:
+        new_ids_set = set(r["corretorId"] for r in new_records)
+        backfill_records = [
+            r for r in today_active
+            if (history.get(r["corretorId"]) or "") >= BACKFILL_SINCE
+            and r["corretorId"] not in new_ids_set
+        ]
+        if NEW_FILTER == "current":
+            backfill_records = [r for r in backfill_records if is_current_year_protocol(r.get("protocolo", ""))]
+        log(f"  BACKFILL: {len(backfill_records)} ids do histórico desde {BACKFILL_SINCE} para reprocessar")
+
     log("Step 4/6: Enrich + filter UF")
     new_mg = []
-    if new_records:
-        pj_new = [r for r in new_records if "*" not in (r.get("cpfCnpj") or "")]
-        log(f"  PJ to enrich: {len(pj_new)} (PF skipped: {len(new_records)-len(pj_new)})")
-        enriched = enrich_many(pj_new, delay=4.0, on_log=log)
+    backfill_mg = []
+    for label, group in (("new", new_records), ("backfill", backfill_records)):
+        if not group:
+            continue
+        pj = [r for r in group if "*" not in (r.get("cpfCnpj") or "")]
+        log(f"  [{label}] PJ to enrich: {len(pj)} (PF skipped: {len(group)-len(pj)})")
+        enriched = enrich_many(pj, delay=4.0, on_log=log)
         # anexa detected_at em cada enriched record
         for r in enriched:
-            r["detected_at"] = run_date
-        new_mg = [r for r in enriched if (r.get("uf") or "").upper() == UF_FILTER]
-        log(f"  enriched {len(enriched)} | UF={UF_FILTER}: {len(new_mg)}")
+            r["detected_at"] = history.get(r["corretorId"]) or run_date
+        mg = [r for r in enriched if (r.get("uf") or "").upper() == UF_FILTER]
+        log(f"  [{label}] enriched {len(enriched)} | UF={UF_FILTER}: {len(mg)}")
+        if label == "new":
+            new_mg = mg
+        else:
+            backfill_mg = mg
+
+    pending = load_pending()
+    if pending:
+        log(f"  pending from previous runs: {len(pending)}")
+    to_send = merge_by_id(pending, backfill_mg, new_mg)
+    email_failed = False
 
     log("Step 5/6: Render HTML + notify")
-    if new_mg and not DRY_RUN:
+    if to_send and not DRY_RUN:
+        dates = sorted(set(r.get("detected_at") or run_date for r in to_send))
+        when = f"detectados em {dates[0]}" if len(dates) == 1 else f"detectados de {dates[0]} a {dates[-1]}"
         html_path = OUT / f"novos_{UF_FILTER}_{run_id}.html"
-        size = render_html(new_mg, html_path, uf_filter=UF_FILTER,
-                           title_extra=f"detectados em {run_date}")
-        log(f"  HTML rendered: {html_path.name} ({size:,} bytes)")
+        size = render_html(to_send, html_path, uf_filter=UF_FILTER, title_extra=when)
+        log(f"  HTML rendered: {html_path.name} ({size:,} bytes) | {len(to_send)} corretores "
+            f"(novos hoje: {len(new_mg)}, pendentes: {len(to_send) - len(new_mg)})")
 
-        subject = f"[SUSEP {UF_FILTER}] {len(new_mg)} novos corretores — {run_date}"
+        subject = f"[SUSEP {UF_FILTER}] {len(to_send)} novos corretores — {run_date}"
+        pend_note = ""
+        if len(to_send) > len(new_mg):
+            pend_note = (f"Inclui {len(to_send) - len(new_mg)} corretores de scans anteriores "
+                         f"que não tinham sido enviados ({when}).\n\n")
         body = (
-            f"{len(new_mg)} novos corretores em {UF_FILTER} desde o último scan.\n\n"
+            f"{len(to_send)} novos corretores em {UF_FILTER}.\n\n"
+            + pend_note +
             "Abra o HTML em anexo para ver a lista completa com filtros e botões de contato.\n\n"
             f"Total escaneado: {len(records):,}\n"
             f"Ativos hoje: {len(today_active):,}\n"
@@ -198,21 +276,27 @@ def main():
             "-- Pipeline Synkra SUSEP\n"
         )
         body_html = build_email_html_summary(
-            new_mg, run_date, len(records), len(today_active), len(new_records)
+            to_send, run_date, len(records), len(today_active), len(new_records)
         )
         try:
             n = send_email(subject, body, attachments=[html_path], html=body_html)
             log(f"  email sent to {n} recipient(s)")
+            pending = []
         except Exception as e:
             log(f"  EMAIL FAILED: {type(e).__name__}: {e}")
-    elif new_mg and DRY_RUN:
-        log(f"  DRY_RUN — would have emailed {len(new_mg)} new {UF_FILTER}")
+            log(f"  {len(to_send)} corretores mantidos na fila para o próximo envio")
+            pending = to_send
+            email_failed = True
+    elif to_send and DRY_RUN:
+        log(f"  DRY_RUN — would have emailed {len(to_send)} {UF_FILTER} (mantidos na fila)")
+        pending = to_send
     else:
         log(f"  no new {UF_FILTER} — skipping email (per requirement)")
 
     log("Step 6/6: Persist state")
     save_known_ids(today_ids)
     save_detection_history(history)
+    save_pending(pending)
     LAST_RUN.write_text(json.dumps({
         "run_id": run_id,
         "timestamp": datetime.now().isoformat(),
@@ -222,7 +306,13 @@ def main():
         f"new_{UF_FILTER}": len(new_mg),
         "scrape_errors": len(errors),
         "history_size": len(history),
+        "pending_email": len(pending),
+        "email_failed": email_failed,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
+    if email_failed:
+        set_github_output("email_failed", "true")
+        log("=== Pipeline done COM FALHA NO EMAIL (estado salvo, saindo com código 1) ===")
+        return 1
     log("=== Pipeline done ===")
     return 0
 

@@ -76,6 +76,7 @@ A partir do dia seguinte, todo dia às **06:30 BRT** o pipeline roda sozinho. Se
 
 ## Troubleshooting
 
-- **Run falha em "send_email"** → App Password errado ou 2FA não ativado. Recrie o App Password e atualize o secret.
+- **Run fica vermelho com "Gmail recusou o login"** → a App Password foi revogada (acontece quando a senha da conta Google muda ou a verificação em duas etapas é mexida). Gere outra em https://myaccount.google.com/apppasswords e atualize o secret `SMTP_PASS`. Os corretores que não saíram ficam guardados em `state/pending_email.json` e vão junto no próximo envio que der certo.
+- **Reenviar corretores antigos** → **Actions → Daily SUSEP scan → Run workflow**, preencha `backfill_since` com a data inicial (ex.: `2026-10-03`). O pipeline reconsulta os CNPJs detectados desde essa data e manda tudo num email só. Leva cerca de 2 horas para dois meses de histórico.
 - **"only N records returned (expected >150k)"** → API SUSEP teve problema temporário. Rode manualmente de novo.
 - **Email não chega** → veja a aba de spam, ou pode ter excedido limite Gmail (500 emails/dia — improvável).
